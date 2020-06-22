@@ -1,0 +1,191 @@
+# This workflow will do a clean install of node dependencies, build the source code and run tests across different versions of node
+# For more information see: https://help.github.com/actions/language-and-framework-guides/using-nodejs-with-github-actions
+
+name: Deploy scheduler-ui to Dev Integration
+
+on:
+  push:
+    branches: [ master ]
+    paths: [ packages/scheduler-ui/** ]
+  pull_request:
+    branches: [ master ]
+    paths: [ packages/scheduler-ui/** ]
+  issue_comment:
+    types: [ created ]
+
+jobs:
+  build:
+    if: github.event_name != 'issue_comment' || (github.event_name == 'issue_comment' && github.event.comment.body == '/deploy-scheduler-ui-to-intdev')
+    runs-on: self-hosted
+    env:
+      NEXUS_AUTH: ${{ secrets.NEXUS }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CODECOV_TOKEN: ${{ secrets.CODECOV }}
+      KUBECONFIG_FILE: ${{ secrets.KUBECONFIG_DEV }}
+      BD: ${{ secrets.BASE_DOMAIN_DEV }}
+      NODE_EXPRESS_API_BASE: ${{ secrets.NODE_EXPRESS_API_BASE_DEV }}
+      
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Install NodeJS.
+      uses: actions/setup-node@v1
+      with:
+        node-version: 12
+
+    - name: Cache node modules
+      uses: actions/cache@v2
+      env:
+        cache-name: cache-node-modules
+      with:
+        # npm cache files are stored in `~/.npm` on Linux/macOS
+        path: .npm
+        key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('**/package-lock.json') }}
+        restore-keys: |
+          ${{ runner.os }}-build-${{ env.cache-name }}-
+          ${{ runner.os }}-build-
+          ${{ runner.os }}-
+
+    - name: Install Dependencies
+      working-directory: ./packages/scheduler-ui
+      run:  npm ci --cache ../../.npm --prefer-offline
+
+    - name: Run Unit Tests.
+      working-directory: ./packages/scheduler-ui
+      run: npm run test:unit
+  
+    - name: Upload Coverage Report.
+      working-directory: ./packages/scheduler-ui
+      run: bash <(curl -s https://codecov.io/bash)
+      
+    - name: Run Linter
+      working-directory: ./packages/scheduler-ui
+      run: npm run lint
+
+    - name: Fix ref for use with Docker and Kubernetes (pull_request).
+      if: github.event_name == 'pull_request'
+      run: |
+        ref="pr-${{ github.event.pull_request.number }}"
+        echo "::set-env name=ref::$ref"
+        echo "::set-env name=sha_short::sha-$(git rev-parse --short=7 ${{ github.sha }})"
+
+    - name: Fix ref for use with Docker and Kubernetes (push).
+      if: github.event_name == 'push'
+      run: |
+        ref="intdev"
+        echo "::set-env name=ref::$ref"
+        echo "::set-env name=sha_short::sha-$(git rev-parse --short=7 ${{ github.sha }})"
+
+    - name: Fix ref for use with Docker and Kubernetes (issue_comment).
+      if: github.event_name == 'issue_comment' && github.event.comment.body == '/deploy-scheduler-ui-to-intdev'
+      run: |
+        ref="intdev"
+        echo "::set-env name=ref::$ref"
+        echo "::set-env name=sha_short::manual-${{ github.run_id }}"
+
+    - name: Build and Push Image to Docker Registry.
+      uses: docker/build-push-action@v1
+      with:
+        path: ./packages/scheduler-ui
+        registry: ${{ secrets.DOCKER_REGISTRY }}
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+        repository: scheduler-ui/${{ env.ref }}
+        cache_froms: scheduler-ui/${{ env.ref }}:latest
+        tag_with_ref: true
+        always_pull: true
+        tags: latest, ${{ env.sha_short }}
+
+    - name: Deploy Review App.
+      uses: deliverybot/helm@v1.6.1
+      with:
+        helm: helm3
+        release: scheduler-ui-${{ env.ref }}
+        namespace: default
+        chart: './packages/scheduler-ui/scheduler-ui/.'
+        token: ${{ github.token }}
+        values: |
+          replicaCount: 1
+          image:
+            repository: ${{ secrets.DOCKER_REGISTRY }}/scheduler-ui/${{ env.ref }}
+            pullPolicy: Always
+            tag: ${{ env.sha_short }}
+          imagePullSecrets:
+            - name: regcred
+          ingress:
+              hosts:
+                  - host: scheduler-ui-${{ env.ref }}.${{ env.BD }}
+                    paths: ['/']
+          config:
+            nodeExpressAPIEndpoint: "http://node-express-api-intdev.dev.vetsez.pro"
+
+  publish:
+    if: github.event_name == 'pull_request'
+    needs: build
+    runs-on: self-hosted
+    env:
+      NEXUS_AUTH: ${{ secrets.NEXUS }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CODECOV_TOKEN: ${{ secrets.CODECOV }}
+      KUBECONFIG_FILE: ${{ secrets.KUBECONFIG_DEV }}
+      BD: ${{ secrets.BASE_DOMAIN_DEV }}
+
+    steps:
+    - name: Fix ref for use with Docker and Kubernetes (pull_request).
+      if: github.event_name == 'pull_request'
+      run: |
+        ref="pr-${{ github.event.pull_request.number }}"
+        echo "::set-env name=ref::$ref"
+
+    - name: Publish details for accessing App.
+      run: echo "App available [here](http://scheduler-ui-${{ env.ref }}.${{ env.BD }})." >app.md
+    - uses: actions/upload-artifact@v1
+      with:
+        name: app-details
+        path: app.md
+    - uses: machine-learning-apps/pr-comment@master
+      with:
+        path: app.md
+
+  release:
+    if: github.event_name == 'push-disabled'
+    needs: build
+    runs-on: self-hosted
+    env:
+      NEXUS_AUTH: ${{ secrets.NEXUS }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CODECOV_TOKEN: ${{ secrets.CODECOV }}
+      KUBECONFIG_FILE: ${{ secrets.KUBECONFIG_DEV }}
+      BD: ${{ secrets.BASE_DOMAIN_DEV }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Install NodeJS.
+      uses: actions/setup-node@v1
+      with:
+        node-version: 12
+
+    - name: Cache node modules
+      uses: actions/cache@v2
+      env:
+        cache-name: cache-node-modules
+      with:
+        # npm cache files are stored in `~/.npm` on Linux/macOS
+        path: .npm
+        key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('**/package-lock.json') }}
+        restore-keys: |
+          ${{ runner.os }}-build-${{ env.cache-name }}-
+          ${{ runner.os }}-build-
+          ${{ runner.os }}-
+
+    - name: Install Dependencies
+      working-directory: ./packages/scheduler-ui
+      run:  npm ci --cache ../../.npm --prefer-offline
+
+    - name: Create Release and publish to NPM.
+      working-directory: ./packages/scheduler-ui
+      run: |
+        npm install @semantic-release/github
+        npx semantic-release
