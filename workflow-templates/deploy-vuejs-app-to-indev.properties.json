@@ -1,6 +1,6 @@
 {
     "name": "Deploy a Vue.js app to Integrated Development Environment",
-    "description": "Build and ,
+    "description": "Build and Vue.js applications to Integrated Development Environment using helm.",
     "categories": [
         "node",
         "kubernetes",
