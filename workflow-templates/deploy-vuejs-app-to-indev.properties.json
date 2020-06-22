@@ -1,0 +1,9 @@
+{
+    "name": "Deploy a Vue.js app to Integrated Development Environment",
+    "description": "Build and ,
+    "categories": [
+        "node",
+        "kubernetes",
+        "docker"
+    ]
+}
